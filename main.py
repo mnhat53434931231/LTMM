@@ -24,7 +24,7 @@ def menu(user):
             except ValueError: print('Số tiền không hợp lệ.')
         elif ch=='0': break
 
-def main():
+def cli_main():
     init_db()
     while True:
         print('\n=== E-WALLET CRYPTO ===\n1. Đăng ký\n2. Đăng nhập\n0. Thoát')
@@ -34,4 +34,15 @@ def main():
         elif ch=='2':
             u=input('Username: '); p=input('Password: '); row=login(u,p); print('✓ Đăng nhập.' if row else '✗ Sai thông tin.'); row and menu(row['username'])
         elif ch=='0': break
+
+def main():
+    import sys
+    init_db()
+    if '--cli' in sys.argv:
+        cli_main()
+    else:
+        from frontend import run_app
+        run_app()
+
 if __name__=='__main__': main()
+

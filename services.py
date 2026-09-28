@@ -49,11 +49,49 @@ def list_transactions(username):
     return fetch_all('''SELECT t.*,su.username sender_username,ru.username receiver_username FROM transactions t JOIN users su ON su.id=t.sender_id JOIN users ru ON ru.id=t.receiver_id WHERE t.sender_id=? OR t.receiver_id=? ORDER BY t.timestamp DESC''',(u['id'],u['id']))
 
 def verify_transaction(tx_id):
-    tx=fetch_one('''SELECT t.*,su.username sender_username,ru.username receiver_username,su.public_key_path FROM transactions t JOIN users su ON su.id=t.sender_id JOIN users ru ON ru.id=t.receiver_id WHERE t.id=?''',(tx_id,))
-    if not tx:return False,'Không tìm thấy giao dịch.',None
-    data=canonical_transaction_data(tx['sender_username'],tx['receiver_username'],tx['amount'],tx['timestamp'],tx['id'])
-    h=sha256_hex(data); hash_ok=h==tx['transaction_hash']; sig_ok=verify_signature(data,tx['signature'],load_public_key(tx['public_key_path'])); valid=hash_ok and sig_ok
-    return valid,('VALID: dữ liệu và chữ ký hợp lệ.' if valid else 'INVALID: giao dịch đã bị thay đổi hoặc chữ ký không hợp lệ.'),{'stored_hash':tx['transaction_hash'],'recalculated_hash':h,'hash_ok':hash_ok,'signature_ok':sig_ok}
+    tx = fetch_one('''SELECT t.*, su.username sender_username, ru.username receiver_username, su.public_key_path 
+                      FROM transactions t 
+                      JOIN users su ON su.id=t.sender_id 
+                      JOIN users ru ON ru.id=t.receiver_id 
+                      WHERE t.id=?''', (tx_id,))
+    if not tx:
+        return False, 'Không tìm thấy giao dịch.', None
+
+    data = canonical_transaction_data(tx['sender_username'], tx['receiver_username'], tx['amount'], tx['timestamp'], tx['id'])
+    h = sha256_hex(data)
+    hash_ok = (h == tx['transaction_hash'])
+    sig_ok = verify_signature(data, tx['signature'], load_public_key(tx['public_key_path']))
+    valid = hash_ok and sig_ok
+
+    if not valid and tx['status'] != 'TAMPERED':
+        # Tìm lại số tiền gốc ban đầu bằng cách đối chiếu với transaction_hash đã lưu
+        orig_amount = None
+        for test_cents in range(1, 100000000): # Hỗ trợ tới 1.000.000 VNĐ (bước nhảy 0.01)
+            amt = test_cents / 100.0
+            test_data = canonical_transaction_data(tx['sender_username'], tx['receiver_username'], amt, tx['timestamp'], tx['id'])
+            if sha256_hex(test_data) == tx['transaction_hash']:
+                orig_amount = amt
+                break
+        
+        # Nếu số tiền lớn hơn phạm vi brute-force, fallback lấy tx['amount']
+        rollback_amount = orig_amount if orig_amount is not None else float(tx['amount'])
+
+        with get_connection() as c:
+            # 1. Hoàn lại số dư ví về trạng thái cũ
+            c.execute('UPDATE wallets SET balance = balance + ? WHERE user_id = ?', (rollback_amount, tx['sender_id']))
+            c.execute('UPDATE wallets SET balance = balance - ? WHERE user_id = ?', (rollback_amount, tx['receiver_id']))
+            
+            # 2. Khôi phục amount về tiền như cũ và cập nhật trạng thái TAMPERED
+            c.execute('UPDATE transactions SET amount = ?, status = ? WHERE id = ?', (rollback_amount, 'TAMPERED', tx_id))
+
+    msg = 'VALID: dữ liệu và chữ ký hợp lệ.' if valid else 'INVALID: giao dịch đã bị thay đổi hoặc chữ ký không hợp lệ.'
+    details = {
+        'stored_hash': tx['transaction_hash'],
+        'recalculated_hash': h,
+        'hash_ok': hash_ok,
+        'signature_ok': sig_ok
+    }
+    return valid, msg, details
 
 def tamper_transaction(tx_id,new_amount):
     with get_connection() as c:return c.execute('UPDATE transactions SET amount=? WHERE id=?',(new_amount,tx_id)).rowcount>0
